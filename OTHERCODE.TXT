@@ -1,0 +1,228 @@
+import streamlit as st
+import pandas as pd
+from windrose import WindroseAxes
+import matplotlib.pyplot as plt
+import numpy as np
+import io
+import tempfile
+from streamlit_folium import st_folium
+import folium
+import calendar
+
+# Set page configuration
+st.set_page_config(page_title="ClanertWAA - Wind Analysis", layout="wide")
+
+# App title
+st.title("🌬️ ClanertWAA: Wind Air Analysis")
+st.write("""
+Analyze meteorological data with **ClanertWAA**:
+- Top Left: **Wind Class Distribution**
+- Top Right: **Wind Rose Visualization**
+- Center: **Map Visualization with Wind Rose Overlay**
+""")
+
+# Sidebar: Upload file and instructions
+st.sidebar.title("Navigation")
+uploaded_file = st.sidebar.file_uploader("📂 Upload your CSV file", type=["csv"])
+
+if st.sidebar.button("ℹ️ Instructions"):
+    st.sidebar.info("""
+### Instructions:
+1. Upload a CSV file with the following columns:
+   - **MO**: Month (1-12)
+   - **WD10M**: Wind Direction (0-360°)
+   - **WS10M**: Wind Speed (m/s)
+2. Choose analysis options from the interface.
+3. Download results as needed.
+""")
+
+if uploaded_file:
+    data = pd.read_csv(uploaded_file)
+
+    if not all(col in data.columns for col in ["MO", "WD10M", "WS10M"]):
+        st.error("The uploaded file must contain 'MO', 'WD10M', and 'WS10M' columns.")
+    else:
+        # Shared Inputs
+        selected_months = st.sidebar.multiselect(
+            "📅 Select Months",
+            options=list(range(1, 13)),
+            format_func=lambda x: f"{x} - {calendar.month_name[x]}"
+        )
+
+        if not selected_months:
+            st.warning("Please select at least one month.")
+        else:
+            filtered_data = data[data['MO'].isin(selected_months)]
+
+            if filtered_data.empty:
+                st.warning(f"No data available for the selected months: {selected_months}.")
+            else:
+                # Layout for visualizations
+                col1, col2 = st.columns(2)
+                col3 = st.container()
+
+                # Wind Class Distribution
+                with col1:
+                    st.subheader("📊 Wind Class Distribution")
+                    bins = [0, 2, 4, 6, 8, 10, 12, 15, 20, float('inf')]
+                    labels = ['0-2', '2-4', '4-6', '6-8', '8-10', '10-12', '12-15', '15-20', '20+']
+
+                    filtered_data['Wind_Class'] = pd.cut(
+                        filtered_data['WS10M'], bins=bins, labels=labels, right=False
+                    )
+
+                    wind_class_distribution = (
+                        filtered_data['Wind_Class']
+                        .value_counts(normalize=True)
+                        .sort_index() * 100
+                    )
+
+                    wind_class_df = wind_class_distribution.reset_index()
+                    wind_class_df.columns = ['Wind Class', 'Percentage']
+
+                    fig_class, ax_class = plt.subplots(figsize=(6, 6))
+                    bars = ax_class.bar(
+                        wind_class_df['Wind Class'],
+                        wind_class_df['Percentage'],
+                        edgecolor='black'
+                    )
+                    ax_class.set_xlabel('Wind Class (m/s)')
+                    ax_class.set_ylabel('Percentage (%)')
+                    ax_class.set_title('Wind Class Distribution')
+                    ax_class.legend(bars, wind_class_df['Wind Class'], title="Wind Class", loc="upper right")
+
+                    st.pyplot(fig_class)
+
+                    # Download Button
+                    buffer_class = io.BytesIO()
+                    fig_class.savefig(buffer_class, format="png")
+                    buffer_class.seek(0)
+                    st.download_button(
+                        "📥 Download Wind Class Chart",
+                        data=buffer_class,
+                        file_name="wind_class_distribution.png",
+                        mime="image/png"
+                    )
+
+                # Wind Rose Visualization
+                with col2:
+                    st.subheader("🌟 Wind Rose Visualization")
+
+                    def plot_wind_rose_with_separated_legend(data_subset):
+                        # Calculate resultant wind vector
+                        u = -data_subset['WS10M'] * np.sin(np.radians(data_subset['WD10M']))
+                        v = -data_subset['WS10M'] * np.cos(np.radians(data_subset['WD10M']))
+                        resultant_speed = np.sqrt(u.mean()**2 + v.mean()**2)
+                        resultant_direction = np.degrees(np.arctan2(u.mean(), v.mean()))
+                        if resultant_direction < 0:
+                            resultant_direction += 360
+
+                        # Create the wind rose plot
+                        fig, ax = plt.subplots(figsize=(6, 6), subplot_kw={'projection': 'windrose'})
+                        ax.bar(
+                            data_subset['WD10M'], data_subset['WS10M'],
+                            normed=True, bins=[0, 2, 4, 6, 8, 10, 12, 15, 20],
+                            edgecolor='black'
+                        )
+
+                        # Add resultant vector arrow
+                        ax.arrow(
+                            resultant_direction, 0, 0, ax.get_rmax() * 0.9,
+                            color="red", lw=1, alpha=0.8, length_includes_head=True,
+                            head_width=ax.get_rmax() * 0.01, head_length=ax.get_rmax() * 0.02
+                        )
+
+                        # Add resultant wind information
+                        ax.text(
+                            0.5, -0.1,
+                            f"Resultant: {resultant_speed:.2f} m/s, Dir: {resultant_direction:.0f}°",
+                            transform=ax.transAxes, fontsize=10, color="red", ha="center"
+                        )
+
+                        # Position the legend to the right of the wind rose
+                        legend = ax.legend(
+                            title="Wind Speed (m/s)",
+                            loc="upper left",
+                            bbox_to_anchor=(1.05, 1),
+                            fontsize=8,
+                            title_fontsize=10
+                        )
+
+                        # Adjust the layout to avoid clipping
+                        fig.tight_layout()
+
+                        return fig
+
+                    fig_wind_rose = plot_wind_rose_with_separated_legend(filtered_data)
+                    st.pyplot(fig_wind_rose)
+
+                    # Download Button
+                    buffer_rose = io.BytesIO()
+                    fig_wind_rose.savefig(buffer_rose, format="png")
+                    buffer_rose.seek(0)
+                    st.download_button(
+                        "📥 Download Wind Rose Chart",
+                        data=buffer_rose,
+                        file_name="wind_rose.png",
+                        mime="image/png"
+                    )
+
+                # Map Visualization
+                    with col3:
+                        st.subheader("🗺️ Wind Rose Overlay on Map")
+
+                        lat = st.number_input("Latitude:", value=0.0, format="%.6f")
+                        lon = st.number_input("Longitude:", value=0.0, format="%.6f")
+
+                        map_layer = st.radio(
+                            "Choose Map Layer:",
+                            options=["OpenStreetMap", "Esri Satellite Hybrid"]
+                        )
+
+                        def save_clean_wind_rose(data_subset):
+                            ax = WindroseAxes.from_ax()
+                            ax.bar(
+                                data_subset['WD10M'], data_subset['WS10M'],
+                                normed=True, bins=[0, 2, 4, 6, 8, 10, 12, 15, 20],
+                                edgecolor="black"
+                            )
+                            ax.grid(False)
+                            ax.set_yticks([])
+                            ax.set_xticks([])
+                            ax.spines["polar"].set_visible(False)
+
+                            buffer = io.BytesIO()
+                            plt.savefig(buffer, format="png", dpi=150, bbox_inches="tight", transparent=True)
+                            plt.close()
+                            buffer.seek(0)
+                            return buffer
+
+                        windrose_buffer = save_clean_wind_rose(filtered_data)
+
+                        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_file:
+                            tmp_file.write(windrose_buffer.getvalue())
+                            temp_image_path = tmp_file.name
+
+                        if map_layer == "OpenStreetMap":
+                            map_plot = folium.Map(location=[lat, lon], zoom_start=14, tiles="OpenStreetMap")
+                        else:
+                            map_plot = folium.Map(
+                                location=[lat, lon],
+                                zoom_start=20,
+                                tiles="https://services.arcgisonline.com/arcgis/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+                                attr="Esri, USGS | Source: Esri, DigitalGlobe, GeoEye, Earthstar Geographics, CNES/Airbus DS, USDA, USGS, AeroGRID, IGN, and the GIS User Community"
+                            )
+
+                        folium.raster_layers.ImageOverlay(
+                            image=temp_image_path,
+                            bounds=[[lat - 0.001, lon - 0.001], [lat + 0.001, lon + 0.001]],
+                            opacity=0.8
+                        ).add_to(map_plot)
+
+
+                        
+
+                        st_folium(map_plot, width=1500, height=700)
+
+
+#air-analysis
